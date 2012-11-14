@@ -1,0 +1,179 @@
+#!/usr/bin/env python
+# Taiga
+# Author: Wynter Woods
+
+import sys
+import json
+import urllib
+import urllib2
+import re
+import subprocess as sub
+import os
+
+# acts as bash 'which' command, used to verify required software exists
+# this was pulled from somewhere on Stack Overflow
+def which(program):
+    def is_exe(fpath):
+        return os.path.exists(fpath) and os.access(fpath, os.X_OK)
+
+    def ext_candidates(fpath):
+        yield fpath
+        for ext in os.environ.get("PATHEXT", "").split(os.pathsep):
+            yield fpath + ext
+
+    fpath, fname = os.path.split(program)
+    if fpath:
+        if is_exe(program):
+            return program
+    else:
+        for path in os.environ["PATH"].split(os.pathsep):
+            exe_file = os.path.join(path, program)
+            for candidate in ext_candidates(exe_file):
+                if is_exe(candidate):
+                    return candidate
+    return None
+
+def checkforrequiredprograms():
+    
+    # Taiga needs setfileicon to run. If not found, download it.
+    if not os.path.exists("setfileicon") or not os.access("setfileicon", os.X_OK):
+        print("setfileicon binary not found. Downloading...")
+        
+        # http://maxao.free.fr/telechargements/setfileicon.gz
+        urllib.urlretrieve("http://maxao.free.fr/telechargements/setfileicon.gz", "setfileicon.gz")
+        sub.call(["gunzip", "setfileicon.gz"])
+        sub.call(["chmod", "+x", "setfileicon"])
+
+    # Taiga also needs ImageMagick's 'convert' utility. However because
+    # ImageMagick is a larger library of tools, we require the user to
+    # handle the download and install process.
+    if which('convert') == None :
+        print("ImageMagick not found and is required to run Taiga.")
+        print("Please download ImageMagick using Homebrew package manager.")
+        print("\tbrew install imagemagick\n")
+        print("If you don't have Homebrew installed, go get it from here:")
+        print("\thttp://mxcl.github.com/homebrew/")
+        return False
+
+def createandsetfoldericnsfromimage(image, cleanfoldername, path):
+    tempimage = "temp-"+cleanfoldername+".png"
+    tempicns = "temp-"+cleanfoldername+".icns"
+    
+    # use ImageMagick's 'convert' tool to create a 512x512 transparent png
+    # We are also pushing stdout to /dev/null
+    with open(os.devnull, "w") as f:
+        sub.call(["convert", image, "-resize", "512x512",
+                                   "-background", "transparent",
+                                   "-gravity", "center",
+                                   "-extent", "512x512",
+                                   "-compose", "Copy_Opacity",
+                                   tempimage], stdout=f)
+
+    # if the image conversion worked, we can continue
+    if os.path.isfile(tempimage):
+
+        # use sips to output .icns file. we also push stdout to /dev/null
+        with open(os.devnull, "w") as f:
+            sub.call(["sips", "-s", "format", "icns", tempimage, "--out", tempicns], stdout=f)
+
+        # set the folder icon. we also push stdout to /dev/null
+        with open(os.devnull, "w") as f:
+            sub.call(["./setfileicon", tempicns, path], stdout=f)
+        
+        # remove leftover image
+        os.remove(tempimage)
+
+    # remove leftover .icns
+    if os.path.isfile(tempicns):
+        os.remove(tempicns)
+
+def getcleanfoldername(folder):
+    # remove subgroup, encoding and audio tags from name
+    cleanfoldername = re.sub("(\[[A-Za-z\s0-9\-\s\,\.\^\_]+\])*", "", folder)
+    cleanfoldername = re.sub("(\([A-Za-z\s0-9\-\s\,\.\^\_]+\))*", "", cleanfoldername)
+    
+    # remove episode numbers
+    cleanfoldername = re.sub("([0-9]{1,3}[\-\s\.][0-9]{1,3})*", "", cleanfoldername)
+    
+    # remove season info
+    cleanfoldername = re.sub("(S[0-9]{1,2})", "", cleanfoldername)
+    pattern = re.compile("((1st|2nd|3rd)*\s*Season\s*[0-9]*)*", re.IGNORECASE)
+    cleanfoldername = pattern.sub("", cleanfoldername)
+    
+    # remove resolution info
+    cleanfoldername = re.sub("([0-9]{3,4}p)", "", cleanfoldername)
+    
+    # remove extra words normally associated with anime folders
+    pattern = re.compile("(Dual|Audio|Blu\.?Ray|MKV|TV|AAC|FLAC|DVD|Rip|DUB|H264|complete|AC\.?1|Various|Sub(s|titles))*", re.IGNORECASE)
+    cleanfoldername = pattern.sub("", cleanfoldername)
+    
+    # clean up extra characters that could confuse MAL's search API and strip excess whitespace
+    cleanfoldername = cleanfoldername.replace("."," ")
+    cleanfoldername = cleanfoldername.replace("+"," Plus ")
+    cleanfoldername = cleanfoldername.replace("~","")
+    cleanfoldername = cleanfoldername.replace("_"," ")
+    cleanfoldername = cleanfoldername.replace("-"," ").rstrip()
+    return cleanfoldername
+
+def getfoldericon(folder, path):
+
+    cleanfoldername = getcleanfoldername(file)
+    print "Getting folder icon for: " + cleanfoldername
+
+    # convert spaces in name to url-compatible characters
+    urlcompatiblesearchname = cleanfoldername.replace(" ","%20")
+    # print "To see search info manually: http://mal-api.com/anime/search?q="+cleanfoldername
+
+    # call MAL API to search for anime info
+    content = urllib2.urlopen("http://mal-api.com/anime/search?q=" + urlcompatiblesearchname).read()
+    
+    # decode JSON data into a python structure
+    data = content
+    decoded = json.loads(data)
+    
+    # if the search actually returned any data, we want to download the image
+    if len(decoded) > 0 :
+        # MAL's api returns a thumbnail. We don't want that, so we change the URL
+        # to instead return the full size image
+        image = decoded[0]['image_url'].replace("t.jpg",".jpg")
+        
+        # and save the image as a temporary jpg
+        malthumbnail = "temp-"+cleanfoldername+".jpg"
+        urllib.urlretrieve(image, malthumbnail)
+        
+        # we will then create and set the folder icon
+        createandsetfoldericnsfromimage(malthumbnail, cleanfoldername, path+"/"+folder)
+        
+        # remove leftover thumbnail
+        if os.path.isfile(malthumbnail):
+            os.remove(malthumbnail)
+    else:
+        # if the search returned no results, print the search info
+        print("\tCould not find image for: "+cleanfoldername)
+        print "\tTo see search info manually: http://mal-api.com/anime/search?q="+urlcompatiblesearchname
+        print
+
+# First things first: Taiga needs two non-standard binaries in order to run
+if checkforrequiredprograms() == False:
+    exit()
+
+# if not enough arguments, exit
+if len(sys.argv) < 2:
+    print "Not enough arguments."
+    print "please call as such:"
+    print sys.argv[0] + " <root-anime-folder>"
+    exit()
+
+rootfolder = sys.argv[1]
+files_in_dir = os.listdir(rootfolder)
+for file in files_in_dir:
+
+    # verify that we are about to work with a folder
+    if os.path.isdir(rootfolder+"/"+file):
+    
+        # if the folder already has an Icon? file, we don't want to mess with it
+        if not os.path.isfile(rootfolder+"/"+file+"/Icon\r") :
+            getfoldericon(file, rootfolder)
+print("After downloading/setting the icons, we need to run a 'sudo killall Finder' or")
+print("you won't see any of the pretty folder icons. Running now...")
+sub.call(["sudo", "killall", "Finder"])
